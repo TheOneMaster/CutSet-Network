@@ -1,10 +1,10 @@
 import numpy as np
-from pandas.core.frame import DataFrame
 import nodes
-from numba import jit
+from numba import jit, prange
+from numba.experimental import jitclass
 
 @jit(nopython=True)
-def findEntropy(X: np.ndarray):
+def findEntropy(X: np.ndarray) -> float:
     "Calculate the entropy of the split"
 
     # Get frequency count for the class (outcome variable)
@@ -22,7 +22,7 @@ def findEntropy(X: np.ndarray):
     return entropy
 
 @jit(nopython=True)
-def findCut(X: np.ndarray, y: np.ndarray):
+def findCut(X: np.ndarray, y: np.ndarray) -> tuple:
     """
     Find the optimal splitting point for a variable when splitting into 2 bins.
     Based on entropy of the dataset (information gain).
@@ -38,8 +38,10 @@ def findCut(X: np.ndarray, y: np.ndarray):
 
     unique_values = np.unique(X)   # Returns a sorted list of unique values
 
+    iteration_length = len(unique_values)-1
+    
     # Only iterate over the unique values in the variable
-    for i in range(len(unique_values)-1):
+    for i in range(iteration_length):
 
         # Choose splitting value as the middle of 2 sequential values
         # TODO: Implement better splitting heuristic
@@ -52,8 +54,8 @@ def findCut(X: np.ndarray, y: np.ndarray):
 
         counts = np.bincount(bin_index)
         counts = counts[1:]
+
         total_entropy = ((counts[0] * entropy_less_than_split) + (counts[1]* entropy_greater_than_split))/len(X)
-        
         temp_inf_gain = dataset_entropy - total_entropy
 
         if temp_inf_gain > information_gain:
@@ -61,7 +63,7 @@ def findCut(X: np.ndarray, y: np.ndarray):
             final_split = split_value
             final_index = bin_index
 
-    return (information_gain, final_split, final_index)
+    return (final_split, information_gain, final_index)
 
 class CutSetNetwork:
 
@@ -72,19 +74,14 @@ class CutSetNetwork:
 
         data - Either a pandas dataframe or a numpy ndarray. Uses ndarray for calculation.
         """
-        pandas_test = isinstance(data, DataFrame)
 
-        # pandas_test = False
-        if pandas_test:
-            data = data.values
-        else:
-            data = data
+        self.nodes = []
 
         data = self.findNumeric(data)
         self.tree = self.learnNetwork(data)
 
     def __str__(self) -> str:
-        return str(self.network)
+        return str(self.tree)
 
     def learnNetwork(self, data) -> nodes.Node:
         """
@@ -115,9 +112,13 @@ class CutSetNetwork:
 
         node.information_gain = inf_gain
 
+        self.nodes.append(node)
+
         return node
 
-    def selectVariable(self, data) -> tuple:
+    @staticmethod
+    @jit(nopython=True, parallel=True)
+    def selectVariable(data) -> tuple:
         
         y = data[:, -1]
         y = y.astype(np.int8)
@@ -128,25 +129,31 @@ class CutSetNetwork:
         final_index = None
         split_value = None
 
-        for variable in range(variables):
+        storage = np.zeros((variables, 2))
+
+        for variable in prange(variables):
             X = data[:, variable].astype(np.number)
             temp_inf = findCut(X, y)
+            storage[variable] = temp_inf[:-1]
 
-            if temp_inf[0] > inf_gain:
-                final_variable = variable
-                final_index = temp_inf[-1]
-                inf_gain = temp_inf[0]
-                split_value = temp_inf[1]
+        final_variable = storage[:, 1].argmax()
+        inf_gain = storage[final_variable, 1]
+        split_value = storage[final_variable, 0]
+
+        tmp_bins = [-np.inf, split_value, np.inf]
+        tmp_variable_data = data[:, final_variable]
+        final_index = np.digitize(tmp_variable_data, tmp_bins)
 
         return (final_variable, final_index, inf_gain, split_value)
   
-    def findNumeric(self, data):
+    def findNumeric(self, data) -> np.ndarray:
 
         variables = data.shape[1]-1
         numeric_variables = []
         for i in range(variables):
             try:
-                data[:, i].astype(np.number)
+                tmp = data[:, i]
+                tmp.astype(np.number)
                 numeric_variables.append(i)
             except ValueError:
                 pass
@@ -154,3 +161,13 @@ class CutSetNetwork:
         numeric_variables.append(-1)
         return data[:, numeric_variables]
 
+if __name__ == "__main__":
+    import pandas as pd
+
+    df = pd.read_csv(r"data\diabetes.csv")
+    df['class'] = df['class'].map({"tested_positive": 1, "tested_negative": 0})
+
+    network = CutSetNetwork(df.values)
+    print(network)
+    # findCut.parallel_diagnostics(level=4)
+    # CutSetNetwork.selectVariable.parallel_diagnostics(level=4)
