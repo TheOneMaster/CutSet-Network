@@ -1,30 +1,30 @@
 import numpy as np
 from collections import namedtuple
 
-from numpy.lib.arraysetops import isin
+from numpy.core.fromnumeric import var
 
 Name = namedtuple('Node', ['variable', 'split', 'l_prob', 'r_prob', 'data', 'inf_gain'])
 
 
 class Node:
 
-    def __init__(self) -> None:
+    def __init__(self, left_prob=0, right_prob=0, variable=0, split_value=0, data_points=0, information_gain=0) -> None:
         
-        self.left_prob = 0
-        self.right_prob = 0
+        self.left_prob = left_prob
+        self.right_prob = right_prob
         self.left_child = None
         self.right_child = None
 
-        self.variable = None
-        self.split_value = None
-        self.data_points = None
-        self.information_gain = None
+        self.variable = variable
+        self.split_value = split_value
+        self.data_points = data_points
+        self.information_gain = information_gain
 
     def __str__(self) -> str:
         n = Name(self.variable, self.split_value, self.left_prob, self.right_prob, self.data_points, self.information_gain)
         return str(n)
 
-    def printTree(self, depth=0):
+    def printTree(self, depth=0) -> None:
         
         print(f"{depth*'-'}[{self.variable} < {self.split_value}] [{self.data_points}]")
 
@@ -37,7 +37,7 @@ class Node:
             else:
                 print(f"{depth*'-'} [Chow-Liu Tree]")
         
-    def findLeaf(self, row: np.ndarray):
+    def findLeaf(self, row: np.ndarray) -> str:
 
         value = row[self.variable]
 
