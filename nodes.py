@@ -1,6 +1,8 @@
 import numpy as np
 from collections import namedtuple
 
+from numpy.lib.arraysetops import isin
+
 Name = namedtuple('Node', ['variable', 'split', 'l_prob', 'r_prob', 'data', 'inf_gain'])
 
 
@@ -35,6 +37,20 @@ class Node:
             else:
                 print(f"{depth*'-'} [Chow-Liu Tree]")
         
-    
+    def findLeaf(self, row: np.ndarray):
 
+        value = row[self.variable]
+
+        if value < self.split_value:
+
+            if isinstance(self.left_child, Node):
+                return self.left_child.findLeaf(row)
+            else:
+                return self.left_child
+        else:
+            
+            if isinstance(self.right_child, Node):
+                return self.right_child.findLeaf(row)
+            else:
+                return self.right_child
         
