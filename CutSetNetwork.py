@@ -1,6 +1,6 @@
 import numpy as np
 import nodes
-from numba import jit, prange
+from numba import jit, prange, njit
 
 @jit(nopython=True)
 def findEntropy(X: np.ndarray) -> float:
@@ -104,6 +104,23 @@ def selectVariable(data: np.ndarray) -> tuple:
 
     return (final_variable, final_index, inf_gain, split_value)
 
+@njit(parallel=True)
+def predict(data, node):
+
+    rows = data.shape[0]
+    prediction = np.zeros(rows)
+    
+    for i in prange(rows):
+
+        row = rows[i]
+        model = node.findLeaf(row)
+
+        predicted = model.predict(row)
+        prediction[i] = predicted
+
+    return prediction
+
+
 class CutSetNetwork:
 
     def __init__(self, data) -> None:
@@ -179,6 +196,12 @@ class CutSetNetwork:
         
         numeric_variables.append(-1)
         return data[:, numeric_variables]
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        
+        prediction = predict(X, self.tree)
+        
+        return prediction
 
 if __name__ == "__main__":
     import pandas as pd
