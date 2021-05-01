@@ -1,8 +1,15 @@
 import numpy as np
-import nodes
-from numba import jit, prange, njit
+import pandas as pd
 
-@jit(nopython=True)
+from numba import prange, njit
+from collections import namedtuple
+
+import nodes
+
+Network = namedtuple('Network', ['leaf', 'min_instances','max_depth'])
+
+
+@njit()
 def findEntropy(X: np.ndarray) -> float:
     "Calculate the entropy of the split"
 
@@ -20,8 +27,8 @@ def findEntropy(X: np.ndarray) -> float:
 
     return entropy
 
-@jit(nopython=True, parallel=True)
-def findCut(X: np.ndarray, y: np.ndarray) -> tuple:
+@njit(parallel=True)
+def findCut(X: np.ndarray, y: np.ndarray, dataset_entropy: float) -> tuple:
     """
     Find the optimal splitting point for a variable when splitting into 2 bins.
     Based on entropy of the dataset (information gain).
@@ -30,11 +37,15 @@ def findCut(X: np.ndarray, y: np.ndarray) -> tuple:
     y: class data
     Both X and y should be arrays of the same length
     """
-    dataset_entropy = findEntropy(y)
+    # dataset_entropy = findEntropy(y)
+    # print(dataset_entropy)
 
     unique_values = np.unique(X)   # Returns a sorted list of unique values
 
     iteration_length = len(unique_values)-1
+
+    if iteration_length == 0:
+        return (-1, 0)
 
     information_gain = np.zeros(iteration_length)
     
@@ -57,41 +68,52 @@ def findCut(X: np.ndarray, y: np.ndarray) -> tuple:
 
         #TODO: Check if both sections have entries
 
-        entropy_less_than_split = findEntropy(y[bin_index==1])
-        entropy_greater_than_split = findEntropy(y[bin_index==2])
-
         counts = np.bincount(bin_index)
-        counts = counts[1:]
 
-        total_entropy = ((counts[0] * entropy_less_than_split) + (counts[1]* entropy_greater_than_split))/len(X)
+        entropy = 0
+        for index, value in enumerate(counts):
+
+            if value == 0:
+                pass
+            else:
+                entropy += (value * findEntropy(y[bin_index==index]))
+
+        # entropy_less_than_split = findEntropy(y[bin_index==1])
+        # entropy_greater_than_split = findEntropy(y[bin_index==2])
+
+        total_entropy = entropy/len(X)
+        # print(total_entropy)
+
+        # total_entropy = ((counts[0] * entropy_less_than_split) + (counts[1]* entropy_greater_than_split))/len(X)
         temp_inf_gain = dataset_entropy - total_entropy
 
         information_gain[i] = temp_inf_gain
     
     max_inf_gain = information_gain.max()
-    
+    max_entropy = dataset_entropy + max_inf_gain
+
     gain_index = information_gain.argmax()
     split_value = (unique_values[gain_index] + unique_values[gain_index+1])/2
 
+    # return information_gain
     return (split_value, max_inf_gain)
 
-@jit(nopython=True, parallel=True)
-def selectVariable(data: np.ndarray) -> tuple:
+@njit()
+def selectVariable(data: np.ndarray, entropy: float) -> tuple:
     
     y = data[:, -1]
     y = y.astype(np.int8)
     variables = data.shape[1] -1 
 
-    inf_gain = -np.inf
     final_variable = None
     final_index = None
     split_value = None
 
     storage = np.zeros((variables, 2))
 
-    for variable in prange(variables):
+    for variable in range(variables):
         X = data[:, variable].astype(np.number)
-        temp_inf = findCut(X, y)
+        temp_inf = findCut(X, y, entropy)
         storage[variable] = temp_inf
 
     final_variable = storage[:, 1].argmax()
@@ -105,7 +127,7 @@ def selectVariable(data: np.ndarray) -> tuple:
     return (final_variable, final_index, inf_gain, split_value)
 
 @njit(parallel=True)
-def predict(data, node):
+def predict(data: np.ndarray, node: nodes.Node):
 
     rows = data.shape[0]
     prediction = np.zeros(rows)
@@ -123,7 +145,7 @@ def predict(data, node):
 
 class CutSetNetwork:
 
-    def __init__(self, data) -> None:
+    def __init__(self, data, leaf_type='chow-liu', min_instances_leaf=50, max_depth=20) -> None:
         """
         Create the cutset network using the data provided. Uses the Node class to store the nodes in the network.
         The network terminates with a Chow-Liu Tree at each leaf.
@@ -131,51 +153,69 @@ class CutSetNetwork:
         data - A numpy ndarray. Uses ndarray for calculation.
         """
 
+        if isinstance(data, pd.DataFrame):
+            self.columns = data.columns
+            data = data.values
+        
+        self.min_leaf = min_instances_leaf
+        self.max_depth = max_depth
         self.nodes = []
+        self.leaf_type = leaf_type
         self.DEBUG = 0
 
-        print(data.shape)
+        # print(data.shape)
         data = self.findNumeric(data).astype(np.number)
-        print(data.shape)
+        # print(data.shape)  # Check whether the shape of the array changed after removing object columns
+
         self.tree = self.learnNetwork(data)
 
     def __str__(self) -> str:
-        return str(self.tree)
+        tree = Network(self.leaf_type, self.min_leaf, self.max_depth)
+        return str(tree)
 
-    def learnNetwork(self, data) -> nodes.Node:
+    def learnNetwork(self, data, depth=0) -> nodes.Node:
         """
         Create the network of nodes using the provided dataset
         """
 
-        termination_condition = 50   # Simple termination condition for when leaves are created
+        min_instances = max([self.min_leaf, len(data)/100])   # Simple termination condition for when leaves are created
+        dataset_entropy = findEntropy(data[:, -1].astype(np.int8))
 
-        if len(data) < termination_condition:
+        if (len(data) < min_instances) or (dataset_entropy == 0) or (depth == self.max_depth):
             #TODO: Import Chow-Liu Tree and return it here
-            return 'Chow-Liu Tree'
+            return self.leaf_type
         
-        self.DEBUG += 1
-        print(self.DEBUG)
+        # self.DEBUG += 1
+        # print(self.DEBUG)
 
-        if self.DEBUG == 553:
-            print("test")
+        # if self.DEBUG == 11:
+            # print("test")
+            # np.savetxt('test.out', data, delimiter=',')
         
-        variable, index, inf_gain, split_value = selectVariable(data)
+        variable, index, inf_gain, split_value = selectVariable(data, dataset_entropy)
 
         _, counts = np.unique(index, return_counts=True)
         probability = counts / len(data)
 
         # Create Node 
 
-        node = nodes.Node()
-        node.left_prob, node.right_prob = probability
-        node.variable = variable
-        node.split_value = split_value
-        node.data_points = len(data)
+        node = nodes.Node(*probability, variable, split_value, len(data), inf_gain, depth)
 
-        node.left_child = self.learnNetwork(data[index==1])
-        node.right_child = self.learnNetwork(data[index==2])
+        for i, value in zip(_, counts):
 
-        node.information_gain = inf_gain
+            if i == 1:
+                if value == 0:
+                    node.left_child = None
+                else:
+                    node.left_child = self.learnNetwork(data[index==i], depth=depth+1)
+            else:
+                if value == 0:
+                    node.right_child = None
+                else:
+                    node.right_child = self.learnNetwork(data[index==i], depth=depth+1)
+
+        # node.left_child = self.learnNetwork(data[index==1])
+        # node.right_child = self.learnNetwork(data[index==2])
 
         self.nodes.append(node)
 
@@ -204,7 +244,6 @@ class CutSetNetwork:
         return prediction
 
 if __name__ == "__main__":
-    import pandas as pd
 
     # df = pd.read_csv(r"data\diabetes.csv")
     # df['class'] = df['class'].map({"tested_positive": 1, "tested_negative": 0})
@@ -212,19 +251,12 @@ if __name__ == "__main__":
     # network = CutSetNetwork(df.values)
     # print(network)
 
-    df2 = pd.read_csv(r"data\bank-additional-full.csv", sep=';')
-    df2['y'] = df2['y'].map({'no': 0, 'yes': 1})
+    df = pd.read_csv(r"data\bank-additional-full.csv", sep=';')
+    df['y'] = df['y'].map({'no': 0, 'yes': 1})
 
-    network = CutSetNetwork(df2.values)
-    print
-    # 
-    # CutSetNetwork.selectVariable.parallel_diagnostics(level=4)
+    network = CutSetNetwork(df, min_instances_leaf=1000)
+    print(network)
 
-    # x = df['age'].values
-    # y = df['class'].values
-
-    # # information_gain = findCut(x, y)
-    # # max_inf_gain = information_gain.max()
-
-    # print(information_gain)
-    # findCut.parallel_diagnostics(level=4)
+    # cut = findCut(df['age'].values, df['class'].values, findEntropy(df['class'].values))
+    # print(cut)
+    
