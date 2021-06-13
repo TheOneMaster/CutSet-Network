@@ -4,9 +4,10 @@ import pandas as pd
 from numba import prange, njit
 from collections import namedtuple
 
-import nodes
+from nodes import TreeNode, LeafNode
+from cltree import create_cltree
 
-Network = namedtuple('Network', ['leaf', 'min_instances','max_depth'])
+Network = namedtuple('Network', ['leaf', 'min_instances','max_depth', 'train_data'])
 
 
 @njit()
@@ -37,8 +38,6 @@ def findCut(X: np.ndarray, y: np.ndarray, dataset_entropy: float) -> tuple:
     y: class data
     Both X and y should be arrays of the same length
     """
-    # dataset_entropy = findEntropy(y)
-    # print(dataset_entropy)
 
     unique_values = np.unique(X)   # Returns a sorted list of unique values
 
@@ -78,13 +77,7 @@ def findCut(X: np.ndarray, y: np.ndarray, dataset_entropy: float) -> tuple:
             else:
                 entropy += (value * findEntropy(y[bin_index==index]))
 
-        # entropy_less_than_split = findEntropy(y[bin_index==1])
-        # entropy_greater_than_split = findEntropy(y[bin_index==2])
-
         total_entropy = entropy/len(X)
-        # print(total_entropy)
-
-        # total_entropy = ((counts[0] * entropy_less_than_split) + (counts[1]* entropy_greater_than_split))/len(X)
         temp_inf_gain = dataset_entropy - total_entropy
 
         information_gain[i] = temp_inf_gain
@@ -99,7 +92,7 @@ def findCut(X: np.ndarray, y: np.ndarray, dataset_entropy: float) -> tuple:
     return (split_value, max_inf_gain)
 
 @njit()
-def selectVariable(data: np.ndarray, entropy: float) -> tuple:
+def selectVariable(data: np.ndarray, entropy: float, variable_mask: np.ndarray) -> tuple:
     
     y = data[:, -1]
     y = y.astype(np.int8)
@@ -112,6 +105,8 @@ def selectVariable(data: np.ndarray, entropy: float) -> tuple:
     storage = np.zeros((variables, 2))
 
     for variable in range(variables):
+        if variable_mask[variable]:
+            continue
         X = data[:, variable].astype(np.number)
         temp_inf = findCut(X, y, entropy)
         storage[variable] = temp_inf
@@ -126,13 +121,13 @@ def selectVariable(data: np.ndarray, entropy: float) -> tuple:
 
     return (final_variable, final_index, inf_gain, split_value)
 
-@njit(parallel=True)
-def predict(data: np.ndarray, node: nodes.Node):
+# @njit(parallel=True)
+def predict(data: np.ndarray, node: TreeNode):
 
     rows = data.shape[0]
     prediction = np.zeros(rows)
     
-    for i in prange(rows):
+    for i in range(rows):
 
         row = rows[i]
         model = node.findLeaf(row)
@@ -145,83 +140,90 @@ def predict(data: np.ndarray, node: nodes.Node):
 
 class CutSetNetwork:
 
-    def __init__(self, data, leaf_type='chow-liu', min_instances_leaf=50, max_depth=20) -> None:
+    def __init__(self, data, leaf_type=create_cltree, min_instances_leaf=50, max_depth=20) -> None:
         """
-        Create the cutset network using the data provided. Uses the Node class to store the nodes in the network.
+        Create the cutset network using the data provided. Uses the TreeNode class to store the nodes in the network.
         The network terminates with a Chow-Liu Tree at each leaf.
 
         data - A numpy ndarray. Uses ndarray for calculation.
         """
 
-        if isinstance(data, pd.DataFrame):
-            self.columns = data.columns
-            data = data.values
-        
         self.min_leaf = min_instances_leaf
         self.max_depth = max_depth
-        self.nodes = []
         self.leaf_type = leaf_type
+        self.nodes = []
         self.DEBUG = 0
+        self.columns = None
+        
+        self.description = Network(str(leaf_type), min_instances_leaf, max_depth, len(data))
 
-        # print(data.shape)
-        data = self.findNumeric(data).astype(np.number)
-        # print(data.shape)  # Check whether the shape of the array changed after removing object columns
+        # Get numeric columns from the data
+        if isinstance(data, pd.DataFrame):
+            data = data.select_dtypes(include=np.number)
+            self.columns = data.columns
+            data = data.to_numpy()
+        else:
+            data = self.findNumeric(data).astype(np.number)
+        
 
-        self.tree = self.learnNetwork(data)
+        variables = np.full(data.shape[1]-1, False)
+        self.tree = self.learnNetwork(data, variables)
 
     def __str__(self) -> str:
-        tree = Network(self.leaf_type, self.min_leaf, self.max_depth)
-        return str(tree)
+        return str(self.description)
 
-    def learnNetwork(self, data, depth=0) -> nodes.Node:
+    def learnNetwork(self, data, variable_mask, depth=0) -> TreeNode:
         """
         Create the network of nodes using the provided dataset
         """
+        if (len(data) <= self.min_leaf) or (depth == self.max_depth) or np.all(variable_mask):
+            
+            leaf_node = self.createLeaf(data, depth)
+            #TODO: Import Chow-Liu Tree and return it here
+            return leaf_node
 
-        min_instances = max([self.min_leaf, len(data)/100])   # Simple termination condition for when leaves are created
         dataset_entropy = findEntropy(data[:, -1].astype(np.int8))
 
-        if (len(data) < min_instances) or (dataset_entropy == 0) or (depth == self.max_depth):
-            #TODO: Import Chow-Liu Tree and return it here
-            return self.leaf_type
+        if dataset_entropy == 0:
+            leaf_node = self.createLeaf(data, depth)
+            return leaf_node
         
-        # self.DEBUG += 1
-        # print(self.DEBUG)
+        variable, index, inf_gain, split_value = selectVariable(data, dataset_entropy, variable_mask)
 
-        # if self.DEBUG == 11:
-            # print("test")
-            # np.savetxt('test.out', data, delimiter=',')
-        
-        variable, index, inf_gain, split_value = selectVariable(data, dataset_entropy)
+        if inf_gain == 0:
+            leaf_node = self.createLeaf(data, depth)
+            # leaf_node = LeafNode(self.leaf_type, len(data), depth)
+            return leaf_node
+
+        variable_mask_new = variable_mask.copy()
+        variable_mask_new[variable] = True
+
 
         _, counts = np.unique(index, return_counts=True)
         probability = counts / len(data)
 
-        # Create Node 
+        # Create TreeNode 
 
-        node = nodes.Node(*probability, variable, split_value, len(data), inf_gain, depth)
+        node = TreeNode(*probability, variable, split_value, len(data), inf_gain, depth)
 
-        for i, value in zip(_, counts):
+        # for i, value in zip(_, counts):
 
-            if i == 1:
-                if value == 0:
-                    node.left_child = None
-                else:
-                    node.left_child = self.learnNetwork(data[index==i], depth=depth+1)
-            else:
-                if value == 0:
-                    node.right_child = None
-                else:
-                    node.right_child = self.learnNetwork(data[index==i], depth=depth+1)
-
-        # node.left_child = self.learnNetwork(data[index==1])
-        # node.right_child = self.learnNetwork(data[index==2])
+        #     if i == 1:
+        #         if value == 0:
+        #             node.left_child = None
+        #         else:
+        node.left_child = self.learnNetwork(data[index==1], variable_mask_new, depth=depth+1)
+            # else:
+            #     if value == 0:
+            #         node.right_child = None
+            #     else:
+        node.right_child = self.learnNetwork(data[index==2], variable_mask_new, depth=depth+1)
 
         self.nodes.append(node)
 
         return node
   
-    def findNumeric(self, data) -> np.ndarray:
+    def findNumeric(self, data: np.ndarray) -> np.ndarray:
 
         variables = data.shape[1]-1
         numeric_variables = []
@@ -243,20 +245,9 @@ class CutSetNetwork:
         
         return prediction
 
-if __name__ == "__main__":
+    def createLeaf(self, data: np.ndarray, depth: int) -> LeafNode:
 
-    # df = pd.read_csv(r"data\diabetes.csv")
-    # df['class'] = df['class'].map({"tested_positive": 1, "tested_negative": 0})
+        model = self.leaf_type(data)
+        leaf_node = LeafNode(model, len(data), depth)
 
-    # network = CutSetNetwork(df.values)
-    # print(network)
-
-    df = pd.read_csv(r"data\bank-additional-full.csv", sep=';')
-    df['y'] = df['y'].map({'no': 0, 'yes': 1})
-
-    network = CutSetNetwork(df, min_instances_leaf=1000)
-    print(network)
-
-    # cut = findCut(df['age'].values, df['class'].values, findEntropy(df['class'].values))
-    # print(cut)
-    
+        return leaf_node
